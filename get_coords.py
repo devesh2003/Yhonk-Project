@@ -6,19 +6,23 @@ import json
 from selenium import webdriver
 import csv
 from time import sleep
-from datetime import date,timedelta
+from datetime import date,timedelta,datetime
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 import os
 from reverse_geocoding import *
+from selenium.webdriver.chrome.options import Options
 from merge import merge
+import send_data
 
 import urllib3
 urllib3.disable_warnings()
 
 progress_count = 0
+missing = []
+dates = []
 
-#Bus id
+#Bus id (Useless)
 # For SAM series : 272 + bus-number
 # For ABP series : 666 + bus-number
 # For ARR series : 509 + bus-number
@@ -42,6 +46,11 @@ progress_count = 0
 # eg: 
 # 42 --> 12
 # 22 --> 42
+
+def log(msg):
+    with open('main.log','a') as file:
+        meta_data = str(date.today()) + "  " + datetime.now().time().strftime("%H:%M:%S") + "  " + ':' + "  "
+        file.write(meta_data + msg + '\n')
 
 
 class CoordinateSearch:
@@ -95,7 +104,11 @@ class CoordinateSearch:
             self.data_arg[key] = kwargs[key]
 
     def get_cookie(self):
-        self.driver = webdriver.Chrome()
+        print('[*] Generating new cookies...')
+        opts = Options()
+        opts.add_argument('--headless')
+        opts.add_argument('--disable-gpu')
+        self.driver = webdriver.Chrome(chrome_options=opts)
         self.driver.get("https://ajlavls.in/abpp/#/login")
         sleep(3)
         self.driver.find_element_by_xpath("/html/body/div/div/div/div/div[2]/div[2]/form/div[1]/input").send_keys('A_Yhonk')
@@ -105,6 +118,7 @@ class CoordinateSearch:
         cookies = self.driver.get_cookies()
         with open('cookies.log','w') as file:
             file.write(str(cookies[0]['value']))
+        print('[*] New Cookies saved!')
         self.cookie = str(cookies[0]['value'])
         self.cookies_arg = {'JSESSIONID':self.cookie}
         self.driver.close()
@@ -156,6 +170,7 @@ class CoordinateSearch:
         start = self.tune_data(from_date,from_time)
         end = self.tune_data(to_date,to_time)
         self.change_args(start=start,end=end)
+        log('Sending POST request')
         req = requests.post('https://ajlavls.in/abpp/rest/mrt',verify=False,data=json.dumps(self.data_arg),
                             headers=self.headers_arg,cookies=self.cookies_arg)
         
@@ -174,8 +189,11 @@ class CoordinateSearch:
             with open('logs.txt','a') as f:
                 f.write(str(e) + '\n')
 
+        log('Data obtained')
+
         # self.data[from_date + " " + self.change(from_time)] = [latitude,longitude]
         # self.data_list.append([from_date,self.change(from_time),latitude,longitude])
+        log('Appending data')
         self.data_list.append([self.name,from_date,self.get_slot(from_time),self.change(from_time),latitude,longitude,self.get_palce(latitude,longitude)])
         self.progress += 1
         # print('{}% done'.format(str((self.progress/72)*100)[:4]))
@@ -210,6 +228,7 @@ class CoordinateSearch:
             return 6
 
     def get_palce(self,lat,lon):
+        log('Getting area')
         return get_area(lat,lon)
         
     def get_next(self,from_date,to_date,from_time,to_time):
@@ -275,18 +294,20 @@ def start(bus,id,dates):
         progress_count += 1
         print("[*] {}/100 buses done".format(str(progress_count)))
     except Exception as e:
-        with open('log_start.txt','a') as file:
-            file.write(str(e) + '\n')
+        with open('errors.log','a') as file:
+            meta_data = str(date.today()) + "  " + datetime.now().time().strftime("%H:%M:%S") + "  " + ':' + "  "
+            file.write(meta_data + str(e) + '\n')
 
 def main():
-    thread_pool = ThreadPoolExecutor(max_workers=1)
+    global dates,progress_count
+    thread_pool = ThreadPoolExecutor(max_workers=2)
     start_date = str(input("Please enter start date (YYYY-MM-DD) : ")).split('-')
     start_date = date(int(start_date[0]),int(start_date[1]),int(start_date[2]))
     end_date = str(input("Please enter end date (YYYY-MM-DD) : ")).split('-')
     end_date = date(int(end_date[0]),int(end_date[1]),int(end_date[2]))
 
     delta = end_date - start_date
-    dates = []
+    # dates = []
 
     for i in range(delta.days + 1):
         day = start_date + timedelta(days=i)
@@ -297,6 +318,11 @@ def main():
             data = line.split(',')
             
             # start(data[0],int(data[1]),dates)
+
+            if os.path.isfile(data[0] + '.csv'):
+                progress_count += 1
+                print('[*] {}/100 buses done'.format(progress_count))
+                continue
             thread_pool.submit(start,data[0],int(data[1]),dates)
             
             # search_thread = Thread(target=start,args=(data[0],int(data[1]),dates))
@@ -305,11 +331,44 @@ def main():
             # search_thread.join()
     thread_pool.shutdown()
 
-    
+def check_all():
+    global missing
+    missing = []
+    print('[*] Checking data...')
+    with open('buses.txt','r') as file:
+        for line in file.readlines():
+            name = line.split(',')[0]
+            if os.path.isfile(name+'.csv'):
+                print('[*] {} reports done'.format(name))
+            else:
+                print('[*] {} reports missing'.format(name))
+                missing.append([name,line.split(',')[1]])
+    fix_missing()
 
+def fix_missing():
+    global missing,dates
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    for i in missing:
+        bus_name = i[0]
+        bus_id = i[1].strip('\n')
+        pool.submit(start,bus_name,int(bus_id),dates)
+    pool.shutdown()
+    if len(missing) != 0:
+        check_all()
+    else:
+        return
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    check_all()
+    # fix_missing()
     merge()
+    sleep(3)
+    send_data.to('deveshthechamp@gmail.com')
+    # send_data.to('info@yhonk.com')
 
 
