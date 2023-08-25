@@ -6,7 +6,7 @@ from datetime import date,datetime
 def to(to_email,body=""):
     try:
         email = 'deveshthechamp@gmail.com'
-        passwd = 'DEVEsh2003'
+        passwd = 'PASSWORD'
 
         
 
